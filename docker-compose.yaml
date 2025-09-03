@@ -1,0 +1,16 @@
+services:
+  package:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - microservices-net
+
+networks:
+  microservices-net:
+    driver: bridge
+    external: true
+    name: microservices
+  
+    
+  
