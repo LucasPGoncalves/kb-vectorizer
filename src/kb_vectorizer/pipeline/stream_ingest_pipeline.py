@@ -28,7 +28,7 @@ def custom_streaming_pipeline(
     print("--- Initializing components for STREAMING mode ---")
     # Set stream=True here. This is the key change.
     ingestor = MySQLIngestor(url=db_url, stream=True)
-    client = chromadb.HttpClient(host="localhost", port=8006, ssl=False)
+    client = chromadb.HttpClient(host="localhost", port=8004, ssl=False)
     store = ChromaStore(client=client)
     store.create_collection(name=collection_name)
     checkpoint = Checkpoint(path=Path("pipeline_checkpoint.json"))

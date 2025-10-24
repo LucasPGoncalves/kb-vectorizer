@@ -6,7 +6,7 @@ import chromadb
 def make_chroma_client(
         engine: str = "http",
         path: str = ".chroma",
-        host: str = "localhost", port: int = 8006, ssl: bool = False,
+        host: str = "chroma", port: int = 8000, ssl: bool = False,
         api_key: str | None = None, tenant: str | None = None, database: str | None = None
 ):
     
