@@ -11,7 +11,7 @@ class TiktokenRecursiveChunker(BaseChunker):
     chunk_overlap: int = 60        # ~10–15% overlap (Azure guidance)
     encoding: str | None = None # e.g., "cl100k_base"
     model: str | None = None    # alternative to encoding
-    separators: list[str] = None
+    separators: list[str] | None= None
 
     @staticmethod
     def _get_encoder(encoding: str | None, model: str | None):

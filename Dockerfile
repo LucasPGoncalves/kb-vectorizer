@@ -1,5 +1,5 @@
 # === Builder ===
-FROM python:3.12-slim AS builder
+FROM python:3.11-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends curl git && rm -rf /var/lib/apt/lists/*
 
@@ -16,7 +16,7 @@ COPY src ./src
 RUN uv sync --frozen
 
 # === Runtime ===
-FROM python:3.12-slim AS runtime
+FROM python:3.11-slim AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY src ./src

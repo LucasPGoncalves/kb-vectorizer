@@ -12,7 +12,9 @@ except ImportError:
     SentenceTransformer = None
 
 class SetenceTransformerEmbedder(BaseEmbedder):
-    """Embed using a SentenceTransformer/HuggingFace model. Two modes:
+    """Embed using a SentenceTransformer/HuggingFace model.
+
+    Two modes:
     1) Local in-process via SentenceTransformer (if installed)
     2) TEI server via REST (fast).
     """
@@ -25,6 +27,16 @@ class SetenceTransformerEmbedder(BaseEmbedder):
         tei_url: str | None = None,
         batch_size: int = 128,
     ):
+        """Initialize the embedder.
+
+        Args:
+            model_id: The ID of the HuggingFace model to use.
+            local: Whether to run the model locally using sentence-transformers.
+            device: The device to run the local model on ('cpu' or 'cuda').
+            tei_url: The URL of the Text Embeddings Inference (TEI) server.
+            batch_size: The batch size to use for embedding.
+
+        """
         self.model_name = model_id
         self.local = local
         self.device = device
@@ -36,7 +48,7 @@ class SetenceTransformerEmbedder(BaseEmbedder):
             if SentenceTransformer is None:
                 raise RuntimeError("sentence-transformers not installed; install it or run a TEI server.")
             self.model = SentenceTransformer(model_id)
-            self.dimension = self.model.get_sentence_embedding_dimension()
+            self.dimension = self.model.get_embedding_dimension()
 
         elif not tei_url:
             raise ValueError("For remote mode, tei_url must be provided.")
@@ -49,6 +61,9 @@ class SetenceTransformerEmbedder(BaseEmbedder):
             return EmbedResponse(vectors=vecs, model=self.model_name, dimension=self.dimension or len(vecs[0]))
 
         else:
+            if not self.tei_url:
+                raise ValueError("tei_url must be set to use remote embedding mode.")
+
             resp = requests.post(
                 f"{self.tei_url.rstrip('/')}/embed",
                 json={"inputs": texts},
