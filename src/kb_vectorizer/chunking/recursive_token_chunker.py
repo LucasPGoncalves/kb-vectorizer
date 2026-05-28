@@ -7,11 +7,35 @@ from kb_vectorizer.chunking.interfaces import BaseChunker, Chunk
 DEFAULT_SEPARATORS: list[str] = ["\n\n", "\n", " ", ""]
 
 class TiktokenRecursiveChunker(BaseChunker):
-    chunk_size: int = 200          # tokens per chunk (start 400–600; tune later)
-    chunk_overlap: int = 60        # ~10–15% overlap (Azure guidance)
-    encoding: str | None = None # e.g., "cl100k_base"
-    model: str | None = None    # alternative to encoding
-    separators: list[str] | None= None
+    """Split text recursively using a list of separators.
+
+    Ensures that each chunk is within the specified token size limit. Overlaps 
+    are computed at the separator level to prevent truncating words, URLs, 
+    or image placeholders.
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = 200,
+        chunk_overlap: int = 60,
+        encoding: str | None = None,
+        model: str | None = None,
+        separators: list[str] | None = None,
+    ):
+        """Initialize the recursive token chunker.
+        
+        Args:
+            chunk_size: Maximum number of tokens per chunk.
+            chunk_overlap: Target number of overlapping tokens between chunks.
+            encoding: The tiktoken encoding name (e.g., "cl100k_base").
+            model: The tiktoken model name (used to infer encoding if encoding is not provided).
+            separators: List of strings to use as separators.
+
+        """
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self._enc = self._get_encoder(encoding, model)
+        self._seps = separators or list(DEFAULT_SEPARATORS)
 
     @staticmethod
     def _get_encoder(encoding: str | None, model: str | None):
@@ -20,10 +44,6 @@ class TiktokenRecursiveChunker(BaseChunker):
         if model:
             return tiktoken.encoding_for_model(model)
         return tiktoken.get_encoding("cl100k_base")
-
-    def __init__(self):
-        self._enc = self._get_encoder(self.encoding, self.model)
-        self._seps = self.separators or list(DEFAULT_SEPARATORS)
 
     def _toklen(self, s: str) -> int:
         return len(self._enc.encode(s))
@@ -40,8 +60,36 @@ class TiktokenRecursiveChunker(BaseChunker):
                 out.append(p)
         return out
 
-    def _split_recursive(self, text: str, chunk_size: int) -> list[str]:
-        if self._toklen(text) <= chunk_size:
+    def _merge_splits(self, splits: list[str]) -> list[str]:
+        """Merge sub-splits into chunks up to chunk_size, applying chunk_overlap."""
+        docs: list[str] = []
+        current_doc: list[str] = []
+        total = 0
+
+        for d in splits:
+            _len = self._toklen(d)
+            if total + _len > self.chunk_size:
+                if total > 0:
+                    docs.append("".join(current_doc))
+                
+                # Setup overlap for next chunk
+                while total > self.chunk_overlap or (
+                    total + _len > self.chunk_size and total > 0
+                ):
+                    total -= self._toklen(current_doc[0])
+                    current_doc.pop(0)
+            
+            current_doc.append(d)
+            total += _len
+            
+        if current_doc:
+            docs.append("".join(current_doc))
+            
+        return docs
+
+    def _split_recursive(self, text: str) -> list[str]:
+        """Recursively split text by separators until pieces fit in chunk_size, then merges them with overlap."""
+        if self._toklen(text) <= self.chunk_size:
             return [text]
 
         for sep in self._seps:
@@ -51,53 +99,28 @@ class TiktokenRecursiveChunker(BaseChunker):
 
             sub_splits: list[str] = []
             for piece in pieces:
-                sub_splits.extend(self._split_recursive(piece, chunk_size))
+                if self._toklen(piece) > self.chunk_size:
+                    sub_splits.extend(self._split_recursive(piece))
+                else:
+                    sub_splits.append(piece)
 
-            merged: list[str] = []
-            cur: list[str] = []
-            cur_len = 0
-            for s in sub_splits:
-                s_len = self._toklen(s)
-                if cur and cur_len + s_len > chunk_size:
-                    merged.append("".join(cur))
-                    cur, cur_len = [], 0
-                cur.append(s)
-                cur_len += s_len
-            if cur:
-                merged.append("".join(cur))
+            return self._merge_splits(sub_splits)
 
-            return merged
-
+        # Fallback if no separators work: split by raw tokens
         toks = self._enc.encode(text)
         out = []
-        for i in range(0, len(toks), chunk_size):
-            out.append(self._enc.decode(toks[i:i + chunk_size]))
-        return out
-
-    def _apply_overlap(self, chunks: list[str], overlap: int) -> list[str]:
-        if overlap <= 0 or not chunks:
-            return chunks
-        if overlap >= self.chunk_size:
-            overlap = max(0, self.chunk_size // 5)
-
-        out: list[str] = []
-        prev_tail_tokens: list[int] = []
-        for idx, ch in enumerate(chunks):
-            if idx == 0:
-                out.append(ch)
-                prev_tail_tokens = self._enc.encode(ch)[-overlap:]
-                continue
-            head_tokens = self._enc.encode(ch)
-            merged_tokens = prev_tail_tokens + head_tokens
-            out.append(self._enc.decode(merged_tokens))
-            prev_tail_tokens = self._enc.encode(ch)[-overlap:]
+        for i in range(0, len(toks), self.chunk_size - self.chunk_overlap):
+            end_idx = min(i + self.chunk_size, len(toks))
+            out.append(self._enc.decode(toks[i:end_idx]))
+            if end_idx == len(toks):
+                break
         return out
 
     def chunk(self, text: str, *, metadata: dict[str, str], doc_id: str) -> list[Chunk]:
-        base_chunks = self._split_recursive(text, self.chunk_size)
-        chunks_with_overlap = self._apply_overlap(base_chunks, self.chunk_overlap)
+        """Chunks a single text string into multiple Chunk objects."""
+        base_chunks = self._split_recursive(text)
         out: list[Chunk] = []
-        for i, ch in enumerate(chunks_with_overlap):
+        for i, ch in enumerate(base_chunks):
             out.append(
                 Chunk(
                     id=f"{doc_id}:{i:06d}",
