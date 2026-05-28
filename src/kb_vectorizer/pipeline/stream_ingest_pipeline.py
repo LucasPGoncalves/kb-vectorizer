@@ -4,7 +4,7 @@ from pathlib import Path
 import chromadb
 
 from kb_vectorizer.chunking.recursive_token_chunker import TiktokenRecursiveChunker
-from kb_vectorizer.embedding.sentence_tranformers_embedder import SetenceTransformerEmbedder
+from kb_vectorizer.embedding.sentence_transformers_embedder import SentenceTransformerEmbedder
 from kb_vectorizer.ingestion.mysql_ingestor import MySQLIngestor, Row
 from kb_vectorizer.preprocessing.html_preprocessor import HTMLProcessor
 from kb_vectorizer.preprocessing.json_to_html_processor import JSONToHTMLPreprocessor
@@ -33,7 +33,7 @@ def custom_streaming_pipeline(
     store.create_collection(name=collection_name)
     checkpoint = Checkpoint(path=Path("pipeline_checkpoint.json"))
     chunker = TiktokenRecursiveChunker()
-    embedder = SetenceTransformerEmbedder()
+    embedder = SentenceTransformerEmbedder()
     html_processor = HTMLProcessor()
     json_to_html = JSONToHTMLPreprocessor(['roteiro', 'problema', 'solucao'], ['tipo', 'sistema', 'consultor', 'versao'])
 

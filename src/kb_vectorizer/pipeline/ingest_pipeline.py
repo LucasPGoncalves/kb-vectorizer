@@ -3,7 +3,7 @@ from pathlib import Path
 import chromadb
 
 from kb_vectorizer.chunking.recursive_token_chunker import TiktokenRecursiveChunker
-from kb_vectorizer.embedding.sentence_tranformers_embedder import SetenceTransformerEmbedder
+from kb_vectorizer.embedding.sentence_transformers_embedder import SentenceTransformerEmbedder
 from kb_vectorizer.ingestion.mysql_ingestor import MySQLIngestor
 from kb_vectorizer.pipeline.indexer import index_document
 from kb_vectorizer.storage.chromadb_store import ChromaStore
@@ -17,7 +17,7 @@ def main():
     store = ChromaStore(client=client)
     checkpoint = Checkpoint(path=Path("checkpoint.json"))
     chunker = TiktokenRecursiveChunker(model="gpt-4")
-    embedder = SetenceTransformerEmbedder(local=True) # Replace with your actual embedder
+    embedder = SentenceTransformerEmbedder() # Replace with your actual embedder
 
     # 2. Get the last updated_at from the checkpoint
     _, last_updated_at = checkpoint.get("last_run") or (None, "1970-01-01 00:00:00")

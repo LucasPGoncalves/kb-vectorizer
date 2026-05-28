@@ -5,7 +5,7 @@ from typing import Any
 
 import typer
 
-from kb_vectorizer.embedding.sentence_tranformers_embedder import SetenceTransformerEmbedder
+from kb_vectorizer.embedding.sentence_transformers_embedder import SentenceTransformerEmbedder
 from kb_vectorizer.ingestion.mysql_ingestor import MySQLIngestor
 from kb_vectorizer.pipeline.stream_ingest_pipeline import custom_streaming_pipeline
 from kb_vectorizer.postprocessing.postprocess import flatten_chroma_result, group_by_doc_id, resolve_parent_documents
@@ -98,7 +98,7 @@ def chroma_query_cmd(
     client = make_chroma_client(engine=engine, path=str(chroma_path))
     store = ChromaStore(client)
 
-    embedder = SetenceTransformerEmbedder(local=True)
+    embedder = SentenceTransformerEmbedder()
     embeds = embedder.embed(texts=[query])
 
     include = ["metadatas", "documents", "distances"]
