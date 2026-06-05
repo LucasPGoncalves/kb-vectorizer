@@ -26,10 +26,27 @@ DATA_URI_RE = re.compile(
     re.DOTALL,
 )
 
-class HTMLProcessor(BasePreprocessor):
+class HTMLProcessor(BasePreprocessor[PreprocessResult]):
+    """Converts an HTML string into Markdown, plain text, and extracted images.
+
+    Processing steps:
+
+    1. Parse the HTML with BeautifulSoup.
+    2. Extract base64-embedded images to disk and rewrite ``<img>`` tags as
+       Markdown image references.
+    3. Optionally keep or strip remote/file ``<img>`` tags.
+    4. Sanitize the remaining HTML with bleach.
+    5. Convert the sanitized HTML to Markdown via markdownify.
+    6. Produce a plain-text version by stripping any remaining tags.
+
+    The result is a :class:`~interfaces.PreprocessResult` containing the
+    Markdown string, plain text, and a list of
+    :class:`~interfaces.ImageRecord` objects for every image saved to disk.
+    """
 
     @staticmethod
     def _ext_for_mime(mime: str) -> str:
+        """Return the file extension for *mime*, falling back to mimetypes."""
         common = {
             "image/png": ".png",
             "image/jpeg": ".jpg",
@@ -63,6 +80,7 @@ class HTMLProcessor(BasePreprocessor):
 
     @staticmethod
     def _extract_caption(img_tag: Tag) -> str | None:
+        """Return the caption for *img_tag* from a ``<figcaption>`` or adjacent inline element."""
         parent = img_tag.parent
         if isinstance(parent, Tag) and parent.name == "figure":
             cap = parent.find("figcaption")
@@ -82,12 +100,21 @@ class HTMLProcessor(BasePreprocessor):
         doc_stem: str = "doc",
         keep_remote_img: bool = True,
     ) -> PreprocessResult:
-        """
-        - parse HTML
-        - extract embedded base64 images to disk
-        - replace <img> with Markdown references
-        - sanitize remaining HTML
-        - return (markdown, plain text, images)
+        """Convert *html* to Markdown, extract images, and return a :class:`PreprocessResult`.
+
+        Args:
+            html: Raw HTML string to process.
+            out_dir: Directory where extracted images will be saved.
+            image_subdir: Sub-directory name inside *out_dir* for images.
+            doc_stem: Prefix used when naming extracted image files.
+            keep_remote_img: When ``True``, remote ``<img>`` tags are rewritten
+                as Markdown references. When ``False``, they are replaced with
+                the placeholder ``[image]``.
+
+        Returns:
+            A :class:`PreprocessResult` with ``markdown``, ``text``, and
+            ``images`` populated.
+
         """
         out_dir = Path(out_dir)
         img_dir = out_dir / image_subdir
@@ -99,9 +126,9 @@ class HTMLProcessor(BasePreprocessor):
 
         # 2) Handle <img> tags (data URIs and remote)
         for img in list(soup.find_all("img")):
-            src = (img.get("src") or "").strip()
-            alt = img.get("alt")
-            title = img.get("title")
+            src = str(img.get("src") or "").strip()
+            alt: str | None = str(img["alt"]) if img.get("alt") is not None else None
+            title: str | None = str(img["title"]) if img.get("title") is not None else None
             caption = self._extract_caption(img)
 
             if src.lower().startswith("data:"):  # embedded base64

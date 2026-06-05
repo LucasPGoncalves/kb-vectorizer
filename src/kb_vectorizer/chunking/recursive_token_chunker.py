@@ -17,7 +17,7 @@ class TiktokenRecursiveChunker(BaseChunker):
     def __init__(
         self,
         chunk_size: int = 200,
-        chunk_overlap: int = 60,
+        chunk_overlap: int = 20,
         encoding: str | None = None,
         model: str | None = None,
         separators: list[str] | None = None,
@@ -115,7 +115,7 @@ class TiktokenRecursiveChunker(BaseChunker):
             if end_idx == len(toks):
                 break
         return out
-
+    
     def chunk(self, text: str, *, metadata: dict[str, str], doc_id: str) -> list[Chunk]:
         """Chunks a single text string into multiple Chunk objects."""
         base_chunks = self._split_recursive(text)
