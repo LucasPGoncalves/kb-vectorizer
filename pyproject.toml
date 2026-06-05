@@ -39,6 +39,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "pre-commit>=3.7"]
 cpu = ["torch"]
+qdrant = ["qdrant-client>=1.9"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
