@@ -544,7 +544,7 @@ class MergedRAGPipeline:
             self.reranker.predict,
             model_inputs,
         )
-        for candidate, score in zip(candidates, scores):
+        for candidate, score in zip(candidates, scores, strict=False):
             candidate.relevance_score = float(score)
 
         candidates.sort(key=lambda c: c.relevance_score, reverse=True)

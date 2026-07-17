@@ -16,16 +16,18 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from kb_vectorizer.embedding.interfaces import BaseEmbedder
 from kb_vectorizer.storage.interfaces import BaseVectorStore, StoredRecord
 
 # Deterministic namespace for converting arbitrary string IDs to UUID5.
-# Qdrant point IDs must be unsigned integers or UUID strings.
+# Qdrant point IDs must be unsigned integers or UUID strings, so an
+# application ID like "doc-1:000042" cannot be used directly.
 _KB_NS = uuid.UUID("b3c9d7e8-4f2a-5b6c-8d9e-0a1b2c3d4e5f")
 
-# Payload keys reserved for internal bookkeeping — excluded from user metadata.
+# The only payload key this store reserves for itself: the original
+# application-level ID, needed to translate back from the internal UUID5.
+# Everything else in payload is the caller's data, untouched.
 _KEY_KB_ID = "_kb_id"
-_KEY_KB_DOC = "_kb_document"
-_RESERVED = frozenset({_KEY_KB_ID, _KEY_KB_DOC})
 
 _DISTANCE_MAP: dict[str, Distance] = {
     "cosine": Distance.COSINE,
@@ -87,8 +89,47 @@ def _to_point_id(kb_id: str) -> str:
     return str(uuid.uuid5(_KB_NS, kb_id))
 
 
+def _build_record(point: Any, score: float | None = None) -> StoredRecord:
+    """Construct a :class:`StoredRecord` from a Qdrant ``Record`` or ``ScoredPoint``.
+
+    Qdrant has no first-class "document" concept — payload is just JSON.  So
+    ``document`` is always ``None`` here; if the caller stored text, it lives
+    in ``metadata`` like any other field.
+
+    Args:
+        point: A Qdrant point object with ``.id``, ``.vector``, and
+            ``.payload`` attributes.
+        score: Similarity score to attach, for query hits. ``None`` for
+            plain ``get``/``scroll`` results.
+
+    Returns:
+        A :class:`~kb_vectorizer.storage.interfaces.StoredRecord` with the
+        original application ID restored from the payload.
+
+    """
+    payload = point.payload or {}
+    original_id = payload.get(_KEY_KB_ID, str(point.id))
+    metadata = {k: v for k, v in payload.items() if k != _KEY_KB_ID}
+    vec = point.vector
+    vector = list(vec) if isinstance(vec, (list, tuple)) else None
+    return StoredRecord(
+        id=original_id,
+        vector=vector,
+        document=None,
+        metadata=metadata or None,
+        score=score,
+    )
+
+
 class QdrantStore(BaseVectorStore):
-    """Thin adapter over an injected :class:`qdrant_client.QdrantClient`.
+    """Qdrant-native adapter over an injected :class:`qdrant_client.QdrantClient`.
+
+    This store is built around Qdrant's own model — points with a vector and
+    a JSON payload — rather than imitating another backend's conventions.
+    It satisfies :class:`~kb_vectorizer.storage.interfaces.BaseVectorStore`
+    and returns :class:`~kb_vectorizer.storage.interfaces.StoredRecord`
+    objects, but the *values* inside those objects reflect what Qdrant
+    actually returns.
 
     The client is injected at construction time so the store works with every
     Qdrant deployment mode:
@@ -103,16 +144,28 @@ class QdrantStore(BaseVectorStore):
     **ID handling:** Qdrant requires point IDs to be UUIDs or unsigned
     integers.  Arbitrary application IDs (e.g. ``"doc-1:000042"``) are
     converted to UUID5 hashes internally.  The original ID is stored in the
-    payload under ``"_kb_id"`` and restored transparently on every read.
+    payload under the single reserved key ``"_kb_id"`` and restored
+    transparently on every read.
 
-    **Text queries:** Qdrant is a pure vector store — it has no built-in
-    embedding function.  Passing *query_texts* to :meth:`query` raises
-    ``ValueError``; callers must pre-embed texts and pass *query_vectors*.
+    **Payload, not document/metadata:** Qdrant payload is one flat JSON
+    object — there's no separate "document" slot.  ``upsert(documents=...)``
+    merges the text into payload under a plain ``"document"`` key (no special
+    treatment), and reads never split it back out: :attr:`StoredRecord.document`
+    is always ``None``, and any text you stored is simply a field inside
+    :attr:`StoredRecord.metadata`, exactly as you'd find it in the payload.
 
-    **Distance scores:** :meth:`query` returns ``1.0 − score`` in the
-    ``"distances"`` field (Chroma-compatible convention: lower = more
-    similar).  This is accurate for cosine similarity; for Euclidean or dot
-    metrics the value is still monotonically ordered but not a true distance.
+    **Scores:** :meth:`query` populates ``StoredRecord.score`` with Qdrant's
+    native similarity score — **higher is more similar**, the opposite
+    convention from Chroma's distance (lower is more similar). Do not assume
+    one backend's ordering convention when swapping stores.
+
+    **Embedding:** unlike Chroma, a plain ``QdrantClient`` has no built-in
+    embedding capability (that would require the separate FastEmbed
+    integration, which this store does not use, to keep model choice
+    identical to :class:`~kb_vectorizer.storage.chromadb_store.ChromaStore`).
+    Pass *embedder* to enable ``documents=``/``query_texts=`` calls; without
+    one, those calls raise ``ValueError`` and you must supply
+    pre-computed vectors instead.
 
     Args:
         client: An instantiated :class:`qdrant_client.QdrantClient`.
@@ -120,6 +173,9 @@ class QdrantStore(BaseVectorStore):
             Required when creating new collections.
         distance: Distance metric to use for new collections.  One of
             ``"cosine"`` (default), ``"dot"``, ``"euclid"``, ``"manhattan"``.
+        embedder: Optional embedder used to turn *documents*/*query_texts*
+            into vectors. Required for text-in calls, since Qdrant itself
+            has no built-in embedding here.
 
     Raises:
         ValueError: If *distance* is not a recognised metric name.
@@ -131,6 +187,7 @@ class QdrantStore(BaseVectorStore):
         client: QdrantClient,
         vector_size: int,
         distance: str = "cosine",
+        embedder: BaseEmbedder | None = None,
     ) -> None:
         """Initialise the store with a Qdrant client and vector configuration.
 
@@ -139,6 +196,7 @@ class QdrantStore(BaseVectorStore):
             vector_size: Number of dimensions in the stored vectors.
             distance: Similarity metric for new collections.  Accepted values:
                 ``"cosine"``, ``"dot"``, ``"euclid"``, ``"manhattan"``.
+            embedder: Optional embedder for text-in calls.
 
         Raises:
             ValueError: If *distance* is not recognised.
@@ -149,6 +207,7 @@ class QdrantStore(BaseVectorStore):
             raise ValueError(
                 f"Unknown distance '{distance}'. Choose: {list(_DISTANCE_MAP)}."
             )
+        super().__init__(embedder=embedder)
         self._client = client
         self._vector_size = vector_size
         self._distance = dist
@@ -206,30 +265,43 @@ class QdrantStore(BaseVectorStore):
     ) -> None:
         """Insert or update records in *collection*.
 
-        Application-level IDs are stored in payload under ``"_kb_id"``; they
-        are restored transparently on reads.  Document text is stored under
-        ``"_kb_document"``.
+        Each record's payload is built from *metadatas* (if given) plus a
+        plain ``"document"`` field (if *documents* is given) — a flat JSON
+        object, Qdrant-style.  The application ID is added last, under the
+        reserved key ``"_kb_id"``, so it always wins over a same-named
+        metadata field.
 
         Args:
             collection: Target collection name.
             ids: Unique application-level IDs.
-            vectors: Embedding vectors, one per record.  If ``None``, a
-                zero vector of length ``vector_size`` is stored — not useful
-                for search, but lets you inspect payloads without embeddings.
-            documents: Raw text content, one per record.
+            vectors: Pre-computed embeddings.  If ``None`` and *documents*
+                is given, embeds via the configured *embedder*.
+            documents: Raw text content, one per record, stored under the
+                payload key ``"document"``.
             metadatas: Metadata dicts, one per record.
 
+        Raises:
+            ValueError: If vectors can't be resolved — *vectors* is
+                ``None`` and either *documents* is ``None`` too, or no
+                embedder is configured.
+
         """
+        resolved = self._resolve_vectors(texts=documents, vectors=vectors)
+        if resolved is None:
+            raise ValueError(
+                "QdrantStore.upsert requires vectors, or documents plus a "
+                "configured embedder (pass embedder=... to the constructor)."
+            )
         points: list[PointStruct] = []
         for i, kb_id in enumerate(ids):
-            payload: dict[str, Any] = {_KEY_KB_ID: kb_id}
-            if documents:
-                payload[_KEY_KB_DOC] = documents[i]
+            payload: dict[str, Any] = {}
             if metadatas and metadatas[i]:
                 payload.update(metadatas[i])
-            vec = list(vectors[i]) if vectors else [0.0] * self._vector_size
+            if documents:
+                payload["document"] = documents[i]
+            payload[_KEY_KB_ID] = kb_id
             points.append(
-                PointStruct(id=_to_point_id(kb_id), vector=vec, payload=payload)
+                PointStruct(id=_to_point_id(kb_id), vector=list(resolved[i]), payload=payload)
             )
         self._client.upsert(collection_name=collection, points=points)
 
@@ -241,14 +313,15 @@ class QdrantStore(BaseVectorStore):
         where: dict[str, Any] | None = None,
         where_document: dict[str, Any] | None = None,
     ) -> None:
-        """Delete records from *collection* by ID and/or filter.
+        """Delete records from *collection* by ID and/or payload filter.
 
         Args:
             collection: Target collection name.
             ids: Delete specific records by their application-level IDs.
-            where: A ``qdrant_client.models.Filter`` object for payload-based
-                deletion.  Raw dicts are not supported by Qdrant.
-            where_document: Not supported by Qdrant — raises ``ValueError``.
+            where: A plain ``{field: value}`` dict, converted to a native
+                Qdrant :class:`~qdrant_client.models.Filter` via
+                :func:`_build_qdrant_filter`.
+            where_document: Not a Qdrant concept — raises ``ValueError``.
 
         Raises:
             ValueError: If *where_document* is provided.
@@ -282,12 +355,15 @@ class QdrantStore(BaseVectorStore):
         Args:
             collection: Source collection name.
             ids: Retrieve only these specific application-level IDs.
-            where: A ``qdrant_client.models.Filter`` for payload filtering
-                when *ids* is ``None``.
+            where: A plain ``{field: value}`` dict, converted to a native
+                Qdrant :class:`~qdrant_client.models.Filter`, used only when
+                *ids* is ``None``.
             limit: Maximum records returned when scrolling (default 100).
 
         Returns:
             A list of :class:`~kb_vectorizer.storage.interfaces.StoredRecord`.
+            ``document`` is always ``None``; stored text (if any) appears in
+            ``metadata`` instead.
 
         """
         if ids is not None:
@@ -317,95 +393,57 @@ class QdrantStore(BaseVectorStore):
         n_results: int = 5,
         where: dict[str, Any] | None = None,
         where_document: dict[str, Any] | None = None,
-        include: Sequence[str] = ("metadatas", "documents", "distances", "embeddings"),
-    ) -> dict[str, Any]:
+        include_vectors: bool = False,
+    ) -> list[list[StoredRecord]]:
         """Run a nearest-neighbour search against *collection*.
-
-        The response format mirrors Chroma's for drop-in interoperability:
-        ``"ids"``, ``"documents"``, ``"metadatas"``, ``"distances"``, and
-        ``"embeddings"`` — each a list-of-lists (one inner list per query
-        vector).
 
         Args:
             collection: Source collection name.
-            query_texts: Not supported — raises ``ValueError``.  Pre-embed
-                your texts and pass *query_vectors* instead.
+            query_texts: Query strings.  Requires a configured embedder —
+                raises ``ValueError`` otherwise.
             query_vectors: Pre-computed query embeddings, one per query.
+                Takes priority over *query_texts* if both are given.
             n_results: Number of nearest neighbours per query.
-            where: A ``qdrant_client.models.Filter`` for payload filtering.
-            where_document: Not supported — raises ``ValueError``.
-            include: Fields to include.  ``"embeddings"`` fetches stored
-                vectors; all others control payload fields in the response.
+            where: A plain ``{field: value}`` dict, converted to a native
+                Qdrant :class:`~qdrant_client.models.Filter`.
+            where_document: Not a Qdrant concept — raises ``ValueError``.
+            include_vectors: Fetch and populate ``StoredRecord.vector`` on
+                each hit.
 
         Returns:
-            A dict with keys from *include*, each mapping to a list-of-lists.
+            One list of :class:`StoredRecord` per query vector, ordered
+            most-similar first, with ``score`` set to Qdrant's native
+            similarity (**higher is more similar**).
 
         Raises:
-            ValueError: If *query_texts* or *where_document* is provided.
-            ValueError: If neither *query_texts* nor *query_vectors* is given.
+            ValueError: If *where_document* is provided.
+            ValueError: If vectors can't be resolved — *query_vectors* is
+                ``None`` and either *query_texts* is ``None`` too, or no
+                embedder is configured.
 
         """
-        if query_texts is not None:
-            raise ValueError(
-                "QdrantStore does not support query_texts. "
-                "Pre-embed your texts and pass query_vectors instead."
-            )
-        if not query_vectors:
-            raise ValueError(
-                "query_vectors must be provided for QdrantStore."
-            )
         if where_document is not None:
             raise ValueError("QdrantStore does not support where_document filters.")
 
-        inc = set(include)
-        with_vectors = "embeddings" in inc
+        resolved = self._resolve_vectors(texts=query_texts, vectors=query_vectors)
+        if resolved is None:
+            raise ValueError(
+                "QdrantStore.query requires query_vectors, or query_texts "
+                "plus a configured embedder (pass embedder=... to the constructor)."
+            )
 
-        all_ids: list[list[str]] = []
-        all_docs: list[list[str | None]] = []
-        all_metas: list[list[dict[str, Any] | None]] = []
-        all_dists: list[list[float]] = []
-        all_embeds: list[list[list[float]] | None] = []
-
-        for qvec in query_vectors:
+        results: list[list[StoredRecord]] = []
+        for qvec in resolved:
             response = self._client.query_points(
                 collection_name=collection,
                 query=list(qvec),
                 limit=n_results,
                 query_filter=_build_qdrant_filter(where),
-                with_vectors=with_vectors,
+                with_vectors=include_vectors,
                 with_payload=True,
             )
-            hits = response.points
-
-            row_ids, row_docs, row_metas, row_dists, row_embeds = [], [], [], [], []
-            for pt in hits:
-                payload = pt.payload or {}
-                row_ids.append(payload.get(_KEY_KB_ID, str(pt.id)))
-                row_docs.append(payload.get(_KEY_KB_DOC))
-                meta = {k: v for k, v in payload.items() if k not in _RESERVED}
-                row_metas.append(meta or None)
-                # 1.0 - score converts cosine similarity to Chroma-style distance.
-                row_dists.append(1.0 - pt.score)
-                if with_vectors:
-                    vec = pt.vector
-                    row_embeds.append(list(vec) if isinstance(vec, (list, tuple)) else None)
-
-            all_ids.append(row_ids)
-            all_docs.append(row_docs)
-            all_metas.append(row_metas)
-            all_dists.append(row_dists)
-            all_embeds.append(row_embeds if with_vectors else None)
-
-        result: dict[str, Any] = {"ids": all_ids}
-        if "documents" in inc:
-            result["documents"] = all_docs
-        if "metadatas" in inc:
-            result["metadatas"] = all_metas
-        if "distances" in inc:
-            result["distances"] = all_dists
-        if "embeddings" in inc:
-            result["embeddings"] = all_embeds
-        return result
+            results.append([_build_record(pt, score=pt.score) for pt in response.points])
+        return results
 
     def count(self, *, collection: str) -> int:
         """Return the total number of records in *collection*.
@@ -431,29 +469,3 @@ class QdrantStore(BaseVectorStore):
             return
         self._closed = True
         self._client.close()
-
-
-def _build_record(point: Any) -> StoredRecord:
-    """Construct a :class:`StoredRecord` from a Qdrant ``Record`` or ``ScoredPoint``.
-
-    Args:
-        point: A Qdrant point object with ``.id``, ``.vector``, and
-            ``.payload`` attributes.
-
-    Returns:
-        A :class:`~kb_vectorizer.storage.interfaces.StoredRecord` with the
-        original application ID restored from the payload.
-
-    """
-    payload = point.payload or {}
-    original_id = payload.get(_KEY_KB_ID, str(point.id))
-    document = payload.get(_KEY_KB_DOC)
-    meta = {k: v for k, v in payload.items() if k not in _RESERVED}
-    vec = point.vector
-    vector = list(vec) if isinstance(vec, (list, tuple)) else None
-    return StoredRecord(
-        id=original_id,
-        vector=vector,
-        document=document,
-        metadata=meta or None,
-    )

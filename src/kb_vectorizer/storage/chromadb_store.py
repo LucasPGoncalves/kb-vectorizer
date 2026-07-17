@@ -3,7 +3,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from kb_vectorizer.embedding.interfaces import BaseEmbedder
 from kb_vectorizer.storage.interfaces import BaseVectorStore, StoredRecord
+
+# Fields always requested from Chroma so returned StoredRecords are fully
+# populated. "embeddings" is added on top of this only when include_vectors=True,
+# since it's the one field expensive enough to skip by default.
+_BASE_INCLUDE = ["metadatas", "documents"]
 
 
 class ChromaStore(BaseVectorStore):
@@ -20,19 +26,32 @@ class ChromaStore(BaseVectorStore):
     Use :func:`~kb_vectorizer.storage.chroma_client_factory.make_chroma_client`
     to construct the appropriate client from a config string.
 
+    **Embedding:** pass *embedder* to control exactly which model turns text
+    into vectors (e.g. ``SentenceTransformerEmbedder`` for any HuggingFace
+    sentence-transformers checkpoint).  When *embedder* is ``None`` and
+    *documents*/*query_texts* are given without vectors, this store falls
+    back to Chroma's own built-in default embedding function (an ONNX
+    MiniLM model) — Chroma's native behavior, unchanged from a plain
+    ``chromadb.Collection``.
+
     Args:
         client: Any Chroma client instance.
+        embedder: Optional embedder used instead of Chroma's built-in default.
 
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, embedder: BaseEmbedder | None = None) -> None:
         """Initialise the store with an already-constructed Chroma client.
 
         Args:
             client: An instantiated Chroma client (EphemeralClient,
                 PersistentClient, HttpClient, or CloudClient).
+            embedder: Optional embedder for text-in calls. If omitted,
+                Chroma's own default embedding function is used whenever
+                vectors aren't supplied directly.
 
         """
+        super().__init__(embedder=embedder)
         self._client = client
         self._closed = False
 
@@ -89,18 +108,21 @@ class ChromaStore(BaseVectorStore):
         Args:
             collection: Target collection name.
             ids: Unique IDs for each record.
-            vectors: Pre-computed embeddings.  Pass ``None`` to let Chroma
-                embed *documents* using its configured embedding function.
+            vectors: Pre-computed embeddings.  If ``None`` and *documents*
+                is given, embeds via the configured *embedder*; with no
+                embedder configured, Chroma's own default embedding
+                function embeds *documents* instead.
             documents: Raw text content, one per record.
             metadatas: Metadata dicts, one per record.
 
         """
+        resolved = self._resolve_vectors(texts=documents, vectors=vectors)
         col = self.get_collection(collection)
         col.upsert(
             ids=list(ids),
-            embeddings=vectors,
-            documents=documents,
-            metadatas=metadatas,
+            embeddings=resolved,
+            documents=list(documents) if documents else None,
+            metadatas=list(metadatas) if metadatas else None,
         )
 
     def delete(
@@ -146,7 +168,8 @@ class ChromaStore(BaseVectorStore):
             limit: Maximum records to return when *ids* is ``None``.
 
         Returns:
-            A list of :class:`~kb_vectorizer.storage.interfaces.StoredRecord`.
+            A list of :class:`~kb_vectorizer.storage.interfaces.StoredRecord`,
+            each with ``vector`` populated and ``score=None``.
 
         """
         col = self.get_collection(collection)
@@ -154,13 +177,14 @@ class ChromaStore(BaseVectorStore):
             ids=list(ids) if ids else None,
             where=where,
             limit=limit,
+            include=["metadatas", "documents", "embeddings"],
         )
         out: list[StoredRecord] = []
         for i, record_id in enumerate(res.get("ids", [])):
             out.append(
                 StoredRecord(
                     id=record_id,
-                    vector=(res["embeddings"][i] if res.get("embeddings") else None),
+                    vector=(res["embeddings"][i] if res.get("embeddings") is not None else None),
                     document=(res["documents"][i] if res.get("documents") else None),
                     metadata=(res["metadatas"][i] if res.get("metadatas") else None),
                 )
@@ -176,13 +200,13 @@ class ChromaStore(BaseVectorStore):
         n_results: int = 5,
         where: dict[str, Any] | None = None,
         where_document: dict[str, Any] | None = None,
-        include: Sequence[str] = ("metadatas", "documents", "distances", "embeddings"),
-    ) -> dict[str, Any]:
+        include_vectors: bool = False,
+    ) -> list[list[StoredRecord]]:
         """Run a nearest-neighbour search against *collection*.
 
-        Passes *query_texts* or *query_vectors* directly to Chroma's
-        ``Collection.query``.  When *query_texts* is used, Chroma embeds them
-        server-side with the collection's configured embedding function.
+        If *query_vectors* is omitted and *query_texts* is given, embeds via
+        the configured *embedder*; with no embedder configured, Chroma's own
+        default embedding function embeds the query texts instead.
 
         Args:
             collection: Source collection name.
@@ -191,23 +215,47 @@ class ChromaStore(BaseVectorStore):
             n_results: Number of nearest neighbours per query.
             where: Chroma metadata filter.
             where_document: Chroma document content filter.
-            include: Fields to include in the response.
+            include_vectors: Fetch and populate ``StoredRecord.vector`` on
+                each hit.
 
         Returns:
-            Chroma's raw query response dict with keys ``"ids"``,
-            ``"documents"``, ``"metadatas"``, ``"distances"``, and
-            optionally ``"embeddings"``.
+            One list of :class:`StoredRecord` per query, ordered nearest
+            first, with ``score`` set to Chroma's native distance
+            (**lower is more similar**).
 
         """
+        resolved = self._resolve_vectors(texts=query_texts, vectors=query_vectors)
+        include = [*_BASE_INCLUDE, "distances"]
+        if include_vectors:
+            include.append("embeddings")
+
         col = self.get_collection(collection)
-        return col.query(
-            query_texts=list(query_texts) if query_texts else None,
-            query_embeddings=list(query_vectors) if query_vectors else None,
+        res = col.query(
+            query_texts=list(query_texts) if resolved is None and query_texts else None,
+            query_embeddings=resolved,
             n_results=n_results,
             where=where,
             where_document=where_document,
-            include=list(include),
+            include=include,
         )
+
+        results: list[list[StoredRecord]] = []
+        ids_rows = res.get("ids") or []
+        for row_idx, row_ids in enumerate(ids_rows):
+            row: list[StoredRecord] = []
+            for col_idx, record_id in enumerate(row_ids):
+                embeddings = res.get("embeddings")
+                row.append(
+                    StoredRecord(
+                        id=record_id,
+                        vector=(embeddings[row_idx][col_idx] if embeddings is not None else None),
+                        document=(res["documents"][row_idx][col_idx] if res.get("documents") else None),
+                        metadata=(res["metadatas"][row_idx][col_idx] if res.get("metadatas") else None),
+                        score=(res["distances"][row_idx][col_idx] if res.get("distances") else None),
+                    )
+                )
+            results.append(row)
+        return results
 
     def count(self, *, collection: str) -> int:
         """Return the total number of records in *collection*.
