@@ -29,15 +29,21 @@ DATA_URI_RE = re.compile(
 class HTMLProcessor(BasePreprocessor[PreprocessResult]):
     """Converts an HTML string into Markdown, plain text, and extracted images.
 
-    Processing steps:
+    Markdown and plain text are built from two independent parses of the
+    same HTML, since they serve different purposes:
 
-    1. Parse the HTML with BeautifulSoup.
-    2. Extract base64-embedded images to disk and rewrite ``<img>`` tags as
-       Markdown image references.
-    3. Optionally keep or strip remote/file ``<img>`` tags.
-    4. Sanitize the remaining HTML with bleach.
-    5. Convert the sanitized HTML to Markdown via markdownify.
-    6. Produce a plain-text version by stripping any remaining tags.
+    - **Markdown** (for display/rendering): base64-embedded images are
+      extracted to disk exactly once and rewritten as Markdown image
+      references (``![alt](path)``); the sanitized HTML is then converted
+      to Markdown via markdownify.
+    - **Plain text** (for embedding): extracted directly from the HTML tags
+      themselves — never from the generated Markdown — so no formatting
+      syntax (``**bold**``, ``# heading``, ``[link](url)``, ``![alt](path)``)
+      leaks into it. Each image contributes only its caption/alt/title text,
+      if any; images with no descriptive text simply disappear rather than
+      leaving a placeholder or file path behind. This pass never touches
+      disk — image bytes are only ever written once, while building the
+      Markdown version.
 
     The result is a :class:`~interfaces.PreprocessResult` containing the
     Markdown string, plain text, and a list of
@@ -91,6 +97,22 @@ class HTMLProcessor(BasePreprocessor[PreprocessResult]):
             return sib.get_text(" ", strip=True)
         return None
 
+    @classmethod
+    def _image_description(cls, img_tag: Tag) -> str | None:
+        """Return the best available human-readable description of *img_tag*.
+
+        Preference order: caption, then alt text, then title. Returns
+        ``None`` if the image has no descriptive text at all — callers
+        should drop such images from plain text entirely rather than
+        inserting a placeholder.
+        """
+        caption = cls._extract_caption(img_tag)
+        alt = img_tag.get("alt")
+        title = img_tag.get("title")
+        alt_str = str(alt) if alt is not None else None
+        title_str = str(title) if title is not None else None
+        return caption or alt_str or title_str or None
+
     def process(
         self,
         html: str,
@@ -120,12 +142,15 @@ class HTMLProcessor(BasePreprocessor[PreprocessResult]):
         img_dir = out_dir / image_subdir
         img_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1) Parse FIRST so data: URIs aren't stripped by a sanitizer
-        soup = BeautifulSoup(html, "html.parser")
+        # Parse the Markdown and plain-text trees independently — each
+        # <img> tag is handled differently for each output (see class
+        # docstring), and mutating one tree must never affect the other.
+        soup_md = BeautifulSoup(html, "html.parser")
+        soup_text = BeautifulSoup(html, "html.parser")
         images: list[ImageRecord] = []
 
-        # 2) Handle <img> tags (data URIs and remote)
-        for img in list(soup.find_all("img")):
+        # --- Markdown tree: extract images to disk, rewrite as Markdown refs ---
+        for img in list(soup_md.find_all("img")):
             src = str(img.get("src") or "").strip()
             alt: str | None = str(img["alt"]) if img.get("alt") is not None else None
             title: str | None = str(img["title"]) if img.get("title") is not None else None
@@ -135,7 +160,7 @@ class HTMLProcessor(BasePreprocessor[PreprocessResult]):
                 try:
                     blob, mime = self._decode_data_uri(src)
                 except Exception:
-                    img.replace_with(soup.new_string("[image: invalid-data-uri]"))
+                    img.replace_with(soup_md.new_string("[image: invalid-data-uri]"))
                     continue
 
                 sha = hashlib.sha256(blob).hexdigest()
@@ -165,21 +190,32 @@ class HTMLProcessor(BasePreprocessor[PreprocessResult]):
                         md_img += f" _{caption}_"
                     img.replace_with(BeautifulSoup(md_img, "html.parser"))
                 else:
-                    img.replace_with(soup.new_string("[image]"))
+                    img.replace_with(soup_md.new_string("[image]"))
 
-        # 3) Now sanitize the RESULT (links, headings, etc.). Allow data: if any remain.
-        safe_html = bleach.clean(
-            str(soup),
+        safe_md_html = bleach.clean(
+            str(soup_md),
             tags=BLEACH_TAGS,
             attributes=BLEACH_ATTRS,
             protocols={"http", "https", "mailto", "tel", "data"},
             strip=True,
         )
-        soup = BeautifulSoup(safe_html, "html.parser")
+        markdown = md(safe_md_html, strip=["img"])
 
-        # 4) HTML → Markdown (imgs already rewritten)
-        markdown = md(str(soup), strip=["img"])
-        # 5) Plain text
-        text = BeautifulSoup(markdown, "html.parser").get_text(" ", strip=True)
+        # --- Plain-text tree: no disk I/O, images collapse to description or nothing ---
+        for img in list(soup_text.find_all("img")):
+            description = self._image_description(img)
+            if description:
+                img.replace_with(soup_text.new_string(description))
+            else:
+                img.decompose()
+
+        safe_text_html = bleach.clean(
+            str(soup_text),
+            tags=BLEACH_TAGS,
+            attributes=BLEACH_ATTRS,
+            protocols={"http", "https", "mailto", "tel", "data"},
+            strip=True,
+        )
+        text = BeautifulSoup(safe_text_html, "html.parser").get_text(" ", strip=True)
 
         return PreprocessResult(markdown=markdown, text=text, images=images)

@@ -7,7 +7,7 @@ from kb_vectorizer.embedding.sentence_transformers_embedder import SentenceTrans
 from kb_vectorizer.ingestion.mysql_ingestor import MySQLIngestor
 from kb_vectorizer.pipeline.indexer import index_document
 from kb_vectorizer.storage.chromadb_store import ChromaStore
-from kb_vectorizer.utils.checkpoint_v2 import Checkpoint
+from kb_vectorizer.utils.checkpoint import Checkpoint
 
 
 def main():

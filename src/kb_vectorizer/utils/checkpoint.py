@@ -1,53 +1,36 @@
 from __future__ import annotations
 
 import json
-import os
-import threading
-from dataclasses import dataclass, field
-from datetime import datetime
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
-class CheckpointStore:
+class Checkpoint:
     path: Path
-    _data: dict[str, str] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    @classmethod
-    def open(cls, path: str | Path) -> CheckpointStore:
-        p = Path(path)
-        if p.exists():
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            data = {}
-        return cls(path=p, _data=data)
-
-    def get(self, key: str) -> datetime | None:
-        raw = self._data.get(key)
-        if not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw)
-        except Exception:
-            return None
-
-    def update_if_greater(self, key: str, dt: datetime | None) -> bool:
-        if dt is None:
-            return False
-        with self._lock:
-            cur = self.get(key)
-            if cur is None or dt > cur:
-                self._data[key] = dt.isoformat()
-                self._atomic_write()
-                return True
-        return False
-
-    def _atomic_write(self) -> None:
+    def load(self) -> dict[str, dict[str, Any]]:
+        if self.path.exists():
+            return json.loads(self.path.read_text(encoding='utf-8'))
+        
+        return {}
+    
+    def save(self, data: dict[str, dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, sort_keys=True)
-        # Atomic replace on Windows/Unix where supported
-        os.replace(tmp, self.path)  # write-then-replace pattern.
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def get(self, key: str) -> tuple[str, int] | None:
+        data = self.load().get(key)
+        if not data:
+            return None
+        return data.get("updated_at"), int(data.get("last_id", 0))
+
+    def put(self, key: str, updated_at: str, last_id: int) -> None:
+        allc = self.load()
+        allc[key] = {"updated_at": updated_at, "last_id": last_id, "ts": int(time.time())}
+        self.save(allc)
+

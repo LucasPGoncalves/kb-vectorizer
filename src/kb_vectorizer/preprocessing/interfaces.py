@@ -36,8 +36,12 @@ class PreprocessResult:
 
     Attributes:
         markdown: Document content converted to Markdown, with embedded
-            images rewritten to local file references.
-        text: Plain-text version of *markdown* (HTML tags stripped).
+            images rewritten to local file references — for rendering/display.
+        text: Pure prose extracted straight from the HTML, with all
+            formatting syntax removed (no ``**bold**``, ``# heading``,
+            ``[link](url)``, or ``![alt](path)`` markup). Images contribute
+            only their caption/alt/title text, if any — never a file path
+            or placeholder token. Intended for embedding.
         images: All images that were extracted and saved to disk.
 
     """

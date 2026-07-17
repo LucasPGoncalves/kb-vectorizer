@@ -218,6 +218,55 @@ def test_html_processor_data_uri_image_referenced_in_markdown(tmp_path):
     assert "chart" in result.markdown or ".png" in result.markdown
 
 
+def test_html_processor_text_excludes_image_markup(tmp_path):
+    """Plain text never contains Markdown image syntax or file paths."""
+    processor = HTMLProcessor()
+    html = f'<p>Intro</p><img src="{_TINY_PNG_DATA_URI}" alt="chart"/><p>Outro</p>'
+    result = processor.process(html, out_dir=tmp_path)
+
+    assert "![" not in result.text
+    assert "](" not in result.text
+    assert ".png" not in result.text
+    assert "Intro" in result.text
+    assert "Outro" in result.text
+
+
+def test_html_processor_text_keeps_image_description(tmp_path):
+    """An image's alt/caption text is preserved in plain text as a plain phrase."""
+    processor = HTMLProcessor()
+    html = f'<p>Intro</p><img src="{_TINY_PNG_DATA_URI}" alt="network diagram"/>'
+    result = processor.process(html, out_dir=tmp_path)
+
+    assert "network diagram" in result.text
+
+
+def test_html_processor_text_drops_undescribed_image(tmp_path):
+    """An image with no alt/caption/title contributes nothing to plain text."""
+    processor = HTMLProcessor()
+    html = f'<p>Intro</p><img src="{_TINY_PNG_DATA_URI}"/><p>Outro</p>'
+    result = processor.process(html, out_dir=tmp_path)
+
+    assert "Intro" in result.text
+    assert "Outro" in result.text
+    # No stray placeholder text like "[image]" or "image" should appear
+    assert "[image]" not in result.text
+
+
+def test_html_processor_text_excludes_markdown_formatting_syntax(tmp_path):
+    """Bold/heading/link markup becomes plain words, not Markdown syntax."""
+    processor = HTMLProcessor()
+    html = '<h1>Title</h1><p><strong>Bold</strong> and <a href="https://x.com">a link</a>.</p>'
+    result = processor.process(html, out_dir=tmp_path)
+
+    assert "#" not in result.text
+    assert "**" not in result.text
+    assert "[a link]" not in result.text
+    assert "https://x.com" not in result.text
+    assert "Title" in result.text
+    assert "Bold" in result.text
+    assert "a link" in result.text
+
+
 def test_html_processor_remote_image_kept_by_default(tmp_path):
     """Remote <img> src is rewritten to a Markdown image reference."""
     processor = HTMLProcessor()

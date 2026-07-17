@@ -9,7 +9,7 @@ from kb_vectorizer.ingestion.mysql_ingestor import MySQLIngestor, Row
 from kb_vectorizer.preprocessing.html_preprocessor import HTMLProcessor
 from kb_vectorizer.preprocessing.json_to_html_processor import JSONToHTMLPreprocessor
 from kb_vectorizer.storage.chromadb_store import ChromaStore
-from kb_vectorizer.utils.checkpoint_v2 import Checkpoint
+from kb_vectorizer.utils.checkpoint import Checkpoint
 
 
 def custom_streaming_pipeline(
