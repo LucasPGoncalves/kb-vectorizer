@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Result
 
 from kb_vectorizer.utils._json_default import _json_default
-from kb_vectorizer.utils.retry_v2 import retryable
+from kb_vectorizer.utils.retry import retryable
 
 from .interfaces import BaseIngestor
 
