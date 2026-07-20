@@ -291,8 +291,7 @@ def build_chunks(
     large_size: int   = LARGE_CHUNK_SIZE,
     overlap:    float = OVERLAP_RATIO,
 ) -> tuple[list[dict], list[dict]]:
-    """
-    Returns (small_chunks, large_chunks).
+    """Returns (small_chunks, large_chunks).
 
     Any key in the source document beyond doc_id / title / text is treated as
     extra metadata and stored in the Qdrant payload, making it available for

@@ -27,7 +27,7 @@ class Checkpoint:
         data = self.load().get(key)
         if not data:
             return None
-        return data.get("updated_at"), int(data.get("last_id", 0))
+        return data.get("updated_at", ""), int(data.get("last_id", 0))
 
     def put(self, key: str, updated_at: str, last_id: int) -> None:
         allc = self.load()
