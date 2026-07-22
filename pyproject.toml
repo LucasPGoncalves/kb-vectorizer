@@ -33,7 +33,8 @@ dependencies = [
   "markdownify>=1.2.0",
   "bleach>=6.2.0",
   "cryptography>=45.0.6",
-  "tiktoken>=0.11.0"
+  "tiktoken>=0.11.0",
+  "rank-bm25>=0.2.2"
 ]
 
 [project.optional-dependencies]

@@ -11,13 +11,17 @@ from qdrant_client.models import (
     Filter,
     FilterSelector,
     MatchValue,
+    Modifier,
     PointIdsList,
     PointStruct,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
 from kb_vectorizer.embedding.interfaces import BaseEmbedder
 from kb_vectorizer.storage.interfaces import BaseVectorStore, StoredRecord
+from kb_vectorizer.text.tokenizer import term_frequency_vector
 
 # Deterministic namespace for converting arbitrary string IDs to UUID5.
 # Qdrant point IDs must be unsigned integers or UUID strings, so an
@@ -28,6 +32,10 @@ _KB_NS = uuid.UUID("b3c9d7e8-4f2a-5b6c-8d9e-0a1b2c3d4e5f")
 # application-level ID, needed to translate back from the internal UUID5.
 # Everything else in payload is the caller's data, untouched.
 _KEY_KB_ID = "_kb_id"
+
+# Name of the named sparse vector field used for native BM25-style search
+# when enable_bm25=True. The dense vector stays unnamed/default either way.
+_SPARSE_VECTOR_NAME = "bm25"
 
 _DISTANCE_MAP: dict[str, Distance] = {
     "cosine": Distance.COSINE,
@@ -167,6 +175,20 @@ class QdrantStore(BaseVectorStore):
     one, those calls raise ``ValueError`` and you must supply
     pre-computed vectors instead.
 
+    **Native BM25 keyword search:** pass ``enable_bm25=True`` to also
+    configure a named sparse vector field (with Qdrant's ``Modifier.IDF``)
+    on every collection this store creates. When enabled, every
+    :meth:`upsert` call with *documents* computes a term-frequency sparse
+    vector via :func:`~kb_vectorizer.text.tokenizer.term_frequency_vector`
+    and attaches it to the same point as the dense vector — no separate
+    indexing step. Qdrant then maintains corpus-wide IDF statistics
+    incrementally, server-side, so — unlike an in-memory ``BM25Okapi``
+    index — the client never needs to hold the whole corpus in memory at
+    once. Call :meth:`keyword_search` to search it directly, or wrap this
+    store in :class:`~kb_vectorizer.retrieval.native_keyword_index.NativeKeywordIndex`
+    to use it through the same interface as
+    :class:`~kb_vectorizer.retrieval.inmemory_keyword_index.InMemoryKeywordIndex`.
+
     Args:
         client: An instantiated :class:`qdrant_client.QdrantClient`.
         vector_size: Dimensionality of the vectors stored in this instance.
@@ -176,6 +198,9 @@ class QdrantStore(BaseVectorStore):
         embedder: Optional embedder used to turn *documents*/*query_texts*
             into vectors. Required for text-in calls, since Qdrant itself
             has no built-in embedding here.
+        enable_bm25: Configure a native sparse-vector BM25 field on every
+            collection this store creates, and populate it automatically
+            from *documents* on every :meth:`upsert`.
 
     Raises:
         ValueError: If *distance* is not a recognised metric name.
@@ -188,6 +213,7 @@ class QdrantStore(BaseVectorStore):
         vector_size: int,
         distance: str = "cosine",
         embedder: BaseEmbedder | None = None,
+        enable_bm25: bool = False,
     ) -> None:
         """Initialise the store with a Qdrant client and vector configuration.
 
@@ -197,6 +223,8 @@ class QdrantStore(BaseVectorStore):
             distance: Similarity metric for new collections.  Accepted values:
                 ``"cosine"``, ``"dot"``, ``"euclid"``, ``"manhattan"``.
             embedder: Optional embedder for text-in calls.
+            enable_bm25: Configure and maintain a native sparse-vector BM25
+                field alongside the dense vector.
 
         Raises:
             ValueError: If *distance* is not recognised.
@@ -211,12 +239,18 @@ class QdrantStore(BaseVectorStore):
         self._client = client
         self._vector_size = vector_size
         self._distance = dist
+        self._enable_bm25 = enable_bm25
         self._closed = False
 
     # ---- collection management ----
 
     def create_collection(self, name: str) -> None:
         """Create *name* if it does not already exist.
+
+        When ``enable_bm25=True`` was passed to the constructor, also
+        configures a named sparse vector field (``"bm25"``) with Qdrant's
+        IDF modifier, so the collection supports native keyword search
+        immediately.
 
         Args:
             name: Collection name to create.
@@ -228,6 +262,11 @@ class QdrantStore(BaseVectorStore):
                 vectors_config=VectorParams(
                     size=self._vector_size,
                     distance=self._distance,
+                ),
+                sparse_vectors_config=(
+                    {_SPARSE_VECTOR_NAME: SparseVectorParams(modifier=Modifier.IDF)}
+                    if self._enable_bm25
+                    else None
                 ),
             )
 
@@ -271,13 +310,19 @@ class QdrantStore(BaseVectorStore):
         reserved key ``"_kb_id"``, so it always wins over a same-named
         metadata field.
 
+        When ``enable_bm25=True`` was passed to the constructor and
+        *documents* is given, each record also gets a term-frequency sparse
+        vector attached automatically — no separate keyword-indexing call
+        needed.
+
         Args:
             collection: Target collection name.
             ids: Unique application-level IDs.
             vectors: Pre-computed embeddings.  If ``None`` and *documents*
                 is given, embeds via the configured *embedder*.
             documents: Raw text content, one per record, stored under the
-                payload key ``"document"``.
+                payload key ``"document"``. Also used to compute the sparse
+                BM25 vector when ``enable_bm25=True``.
             metadatas: Metadata dicts, one per record.
 
         Raises:
@@ -300,9 +345,18 @@ class QdrantStore(BaseVectorStore):
             if documents:
                 payload["document"] = documents[i]
             payload[_KEY_KB_ID] = kb_id
-            points.append(
-                PointStruct(id=_to_point_id(kb_id), vector=list(resolved[i]), payload=payload)
-            )
+
+            vector: dict[str, Any] | list[float] = list(resolved[i])
+            if self._enable_bm25:
+                vector = {"": list(resolved[i])}
+                if documents:
+                    tf = term_frequency_vector(documents[i])
+                    if tf:
+                        vector[_SPARSE_VECTOR_NAME] = SparseVector(
+                            indices=list(tf.keys()), values=list(tf.values())
+                        )
+
+            points.append(PointStruct(id=_to_point_id(kb_id), vector=vector, payload=payload))
         self._client.upsert(collection_name=collection, points=points)
 
     def delete(
@@ -444,6 +498,52 @@ class QdrantStore(BaseVectorStore):
             )
             results.append([_build_record(pt, score=pt.score) for pt in response.points])
         return results
+
+    def keyword_search(
+        self, *, collection: str, query_text: str, k: int = 50
+    ) -> list[StoredRecord]:
+        """Run a native BM25-style keyword search against *collection*'s sparse vector field.
+
+        Tokenizes *query_text* into term frequencies the same way
+        :meth:`upsert` does for documents, then searches the sparse vector
+        field — Qdrant applies its IDF modifier and length normalization
+        server-side, using corpus statistics it has maintained
+        incrementally since ingestion.
+
+        Implements :class:`~kb_vectorizer.retrieval.interfaces.SupportsKeywordSearch`,
+        so this store can be wrapped directly in
+        :class:`~kb_vectorizer.retrieval.native_keyword_index.NativeKeywordIndex`.
+
+        Args:
+            collection: Source collection name.
+            query_text: Raw query string.
+            k: Maximum number of hits to return.
+
+        Returns:
+            Matches ordered best-first (highest score first), with ``score``
+            set to Qdrant's native BM25 relevance score. Empty if
+            *query_text* tokenizes to no terms.
+
+        Raises:
+            ValueError: If ``enable_bm25=False`` on this store instance.
+
+        """
+        if not self._enable_bm25:
+            raise ValueError(
+                "keyword_search requires enable_bm25=True on this QdrantStore instance."
+            )
+        tf = term_frequency_vector(query_text)
+        if not tf:
+            return []
+        sparse_query = SparseVector(indices=list(tf.keys()), values=list(tf.values()))
+        response = self._client.query_points(
+            collection_name=collection,
+            query=sparse_query,
+            using=_SPARSE_VECTOR_NAME,
+            limit=k,
+            with_payload=True,
+        )
+        return [_build_record(pt, score=pt.score) for pt in response.points]
 
     def count(self, *, collection: str) -> int:
         """Return the total number of records in *collection*.

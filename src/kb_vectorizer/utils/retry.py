@@ -6,6 +6,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 
 def retryable(fn, *, attempts: int = 6, base: float = 0.25, max_wait: float = 8.0):
+    """Retry a function upon encountering a DBAPIError or OperationalError."""
     def wrapper(*args, **kwargs):
         delay = base
         for i in range(attempts):

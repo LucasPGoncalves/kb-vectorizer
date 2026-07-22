@@ -4,7 +4,7 @@ from typing import Any
 
 from kb_vectorizer.chunking.recursive_token_chunker import TiktokenRecursiveChunker
 from kb_vectorizer.embedding.interfaces import BaseEmbedder
-from kb_vectorizer.retrieval.keyword_index import KeywordIndex
+from kb_vectorizer.retrieval.keyword_index_old import KeywordIndex
 from kb_vectorizer.storage.chromadb_store import ChromaStore
 
 
