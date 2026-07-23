@@ -50,9 +50,6 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 
-[project.scripts]
-kb-vectorizer = "kb_vectorizer.cli:app"
-
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]

@@ -500,7 +500,12 @@ class QdrantStore(BaseVectorStore):
         return results
 
     def keyword_search(
-        self, *, collection: str, query_text: str, k: int = 50
+        self,
+        *,
+        collection: str,
+        query_text: str,
+        k: int = 50,
+        where: dict[str, Any] | None = None,
     ) -> list[StoredRecord]:
         """Run a native BM25-style keyword search against *collection*'s sparse vector field.
 
@@ -510,14 +515,22 @@ class QdrantStore(BaseVectorStore):
         server-side, using corpus statistics it has maintained
         incrementally since ingestion.
 
-        Implements :class:`~kb_vectorizer.retrieval.interfaces.SupportsKeywordSearch`,
-        so this store can be wrapped directly in
-        :class:`~kb_vectorizer.retrieval.native_keyword_index.NativeKeywordIndex`.
+        Implements :class:`~kb_vectorizer.retrieval.interfaces.SupportsKeywordSearch`
+        (``where`` is an extra, Qdrant-specific keyword-only parameter, which
+        doesn't break that structural match), so this store can be wrapped
+        directly in :class:`~kb_vectorizer.retrieval.native_keyword_index.NativeKeywordIndex`
+        — or called directly when you specifically want filtered keyword
+        search, e.g. ``keyword_search(..., where={"zone": "NORTH", "doc_type": "incident_report"})``.
 
         Args:
             collection: Source collection name.
             query_text: Raw query string.
             k: Maximum number of hits to return.
+            where: A plain ``{field: value}`` dict, converted to a native
+                Qdrant :class:`~qdrant_client.models.Filter` via
+                :func:`_build_qdrant_filter`, applied at the HNSW graph
+                level alongside the keyword search — not as a
+                post-processing step.
 
         Returns:
             Matches ordered best-first (highest score first), with ``score``
@@ -541,6 +554,7 @@ class QdrantStore(BaseVectorStore):
             query=sparse_query,
             using=_SPARSE_VECTOR_NAME,
             limit=k,
+            query_filter=_build_qdrant_filter(where),
             with_payload=True,
         )
         return [_build_record(pt, score=pt.score) for pt in response.points]

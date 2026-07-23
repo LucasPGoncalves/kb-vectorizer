@@ -6,14 +6,33 @@ from .interfaces import BaseFusor
 
 
 class RRFFusor(BaseFusor):
+    """Reciprocal Rank Fusion (RRF) — combines rankings without needing their raw scores.
+
+    RRF only looks at each ID's *rank* within a ranking, not its
+    similarity score or distance — which is exactly why it can combine a
+    dense-vector ranking (Chroma-style distances, lower is better;
+    Qdrant-style scores, higher is better) with a keyword ranking
+    (BM25 score, higher is better) without first having to normalize or
+    reconcile those different conventions.
+    """
 
     @staticmethod
     def fuse(rankings: Iterable[list[str]], k: int = 60) -> list[tuple[str, float]]:
-        """Reciprocal Rank Fusion (RRF).
-        rankings: list of ranked ID lists (best first) from different retrievers.
-        Returns: list of (id, score) sorted by fused score desc.
+        """Fuse multiple rankings of IDs via Reciprocal Rank Fusion.
 
-        score(d) = sum_{runs r} 1 / (k + rank_r(d)), rank_r(d) starts at 1.
+        ``score(d) = sum over rankings r of 1 / (k + rank_r(d))``, where
+        ``rank_r(d)`` is ``d``'s 1-based position in ranking ``r`` (an ID
+        absent from a given ranking simply contributes nothing from it).
+
+        Args:
+            rankings: One ranked list of IDs per retriever/lane, each
+                ordered best-first.
+            k: Fusion constant that dampens the influence of low ranks;
+                60 is the standard default from the original RRF paper.
+
+        Returns:
+            ``(id, fused_score)`` pairs, sorted by fused score descending.
+
         """
         scores: dict[str, float] = {}
         for run in rankings:

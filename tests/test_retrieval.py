@@ -247,3 +247,39 @@ def test_qdrant_keyword_search_requires_enable_bm25():
 
     with pytest.raises(ValueError, match="enable_bm25"):
         store.keyword_search(collection=COLLECTION, query_text="anything", k=5)
+
+
+def test_qdrant_keyword_search_where_filter_scopes_results(qdrant_bm25_store: QdrantStore):
+    """where= restricts keyword search to matching payload fields, at the HNSW level."""
+    qdrant_bm25_store.upsert(
+        collection=COLLECTION,
+        ids=["north-doc", "south-doc"],
+        vectors=[V1, V2],
+        documents=["quick fox jumps", "quick fox jumps"],
+        metadatas=[{"zone": "NORTH"}, {"zone": "SOUTH"}],
+    )
+
+    north_only = qdrant_bm25_store.keyword_search(
+        collection=COLLECTION, query_text="quick fox", k=5, where={"zone": "NORTH"}
+    )
+    south_only = qdrant_bm25_store.keyword_search(
+        collection=COLLECTION, query_text="quick fox", k=5, where={"zone": "SOUTH"}
+    )
+
+    assert {r.id for r in north_only} == {"north-doc"}
+    assert {r.id for r in south_only} == {"south-doc"}
+
+
+def test_qdrant_keyword_search_no_where_returns_all_matches(qdrant_bm25_store: QdrantStore):
+    """Without a where filter, keyword search considers the whole collection."""
+    qdrant_bm25_store.upsert(
+        collection=COLLECTION,
+        ids=["north-doc", "south-doc"],
+        vectors=[V1, V2],
+        documents=["quick fox jumps", "quick fox jumps"],
+        metadatas=[{"zone": "NORTH"}, {"zone": "SOUTH"}],
+    )
+
+    results = qdrant_bm25_store.keyword_search(collection=COLLECTION, query_text="quick fox", k=5)
+
+    assert {r.id for r in results} == {"north-doc", "south-doc"}
