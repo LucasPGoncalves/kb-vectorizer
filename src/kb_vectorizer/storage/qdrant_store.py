@@ -10,6 +10,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    MatchAny,
     MatchValue,
     Modifier,
     PointIdsList,
@@ -48,14 +49,17 @@ _DISTANCE_MAP: dict[str, Distance] = {
 def _build_qdrant_filter(filters: dict[str, Any] | None) -> Filter | None:
     """Convert a plain ``{field: value}`` dict into a Qdrant :class:`Filter`.
 
-    Each key/value pair becomes a ``MatchValue`` condition; all conditions are
-    combined with ``must`` (logical AND).  The filter is applied at the HNSW
-    graph level during search, so it adds negligible latency compared to
-    post-processing.
+    A scalar value becomes a ``MatchValue`` condition (exact equality); a
+    ``list``/``tuple``/``set`` value becomes a ``MatchAny`` condition (the
+    field must equal *any* of the given values — the equivalent of Chroma's
+    ``{"$in": [...]}``).  All conditions are combined with ``must``
+    (logical AND).  The filter is applied at the HNSW graph level during
+    search, so it adds negligible latency compared to post-processing.
 
     Args:
         filters: A mapping of payload field names to their required values,
-            e.g. ``{"zone": "NORTH", "doc_type": "incident_report"}``.
+            e.g. ``{"zone": "NORTH", "doc_type": "incident_report"}`` or
+            ``{"doc_id": ["12", "34", "56"]}``.
             Pass ``None`` or an empty dict to match all records.
 
     Returns:
@@ -66,18 +70,22 @@ def _build_qdrant_filter(filters: dict[str, Any] | None) -> Filter | None:
         >>> _build_qdrant_filter({"zone": "NORTH"})
         Filter(must=[FieldCondition(key='zone', match=MatchValue(value='NORTH'))])
 
+        >>> _build_qdrant_filter({"doc_id": ["1", "2"]})
+        Filter(must=[FieldCondition(key='doc_id', match=MatchAny(any=['1', '2']))])
+
         >>> _build_qdrant_filter(None)
         None
 
     """
     if not filters:
         return None
-    return Filter(
-        must=[
-            FieldCondition(key=field, match=MatchValue(value=value))
-            for field, value in filters.items()
-        ]
-    )
+    conditions = []
+    for field, value in filters.items():
+        if isinstance(value, (list, tuple, set)):
+            conditions.append(FieldCondition(key=field, match=MatchAny(any=list(value))))
+        else:
+            conditions.append(FieldCondition(key=field, match=MatchValue(value=value)))
+    return Filter(must=conditions)
 
 
 def _to_point_id(kb_id: str) -> str:
