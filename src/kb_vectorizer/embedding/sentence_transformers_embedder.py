@@ -53,7 +53,12 @@ class SentenceTransformerEmbedder(BaseEmbedder):
             An EmbedResponse containing the computed vectors, model name, and dimension.
 
         """
-        tensors = self.model.encode(texts, convert_to_numpy=False, device=self.device)
+        tensors = self.model.encode(
+            texts,
+            convert_to_numpy=False,
+            device=self.device,
+            batch_size=self.max_batch_size,
+        )
         vecs = [t.tolist() for t in tensors]
         return EmbedResponse(
             vectors=vecs, 
